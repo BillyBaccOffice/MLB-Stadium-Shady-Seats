@@ -1,0 +1,610 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>&#9918; MLB Stadium Sun Tracker</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;}
+body{background:#0a0f1e;font-family:system-ui,-apple-system,sans-serif;color:#fff;}
+::-webkit-scrollbar{width:5px;}::-webkit-scrollbar-track{background:#0a0f1e;}::-webkit-scrollbar-thumb{background:#2d3f5c;border-radius:3px;}
+select,input{outline:none;}select option{background:#1a2540;}
+.scard{transition:all 0.12s;}.scard:hover{transform:translateY(-1px);border-color:#2a4a8f!important;}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const {useState,useCallback,useMemo}=React;
+
+// ── SOLAR MATH ──────────────────────────────────────────────
+const R=d=>d*Math.PI/180,D=r=>r*180/Math.PI;
+function sunPos(year,month,day,localHour,tzOff,lat,lon){
+  const uh=localHour-tzOff;
+  let h=((uh%24)+24)%24,d=day+(uh<0?-1:uh>=24?1:0);
+  let y=year,m=month;if(m<=2){y--;m+=12;}
+  const A=Math.floor(y/100),B=2-A+Math.floor(A/4);
+  const JD=Math.floor(365.25*(y+4716))+Math.floor(30.6001*(m+1))+d+B-1524.5+h/24;
+  const n=JD-2451545;
+  const L=((280.46+0.9856474*n)%360+360)%360;
+  const g=R(((357.528+0.9856003*n)%360+360)%360);
+  const lam=R(L+1.915*Math.sin(g)+0.02*Math.sin(2*g));
+  const eps=R(23.439-0.0000004*n);
+  const RA=Math.atan2(Math.cos(eps)*Math.sin(lam),Math.cos(lam));
+  const dec=Math.asin(Math.sin(eps)*Math.sin(lam));
+  const GMST=((6.697375+0.0657098242*n+h)%24+24)%24;
+  const LHA=R(((GMST*15+lon-D(RA))%360+360)%360);
+  const lr=R(lat);
+  const sa=Math.sin(lr)*Math.sin(dec)+Math.cos(lr)*Math.cos(dec)*Math.cos(LHA);
+  const alt=D(Math.asin(Math.max(-1,Math.min(1,sa))));
+  const az=Math.atan2(-Math.cos(dec)*Math.sin(LHA),Math.sin(dec)*Math.cos(lr)-Math.cos(dec)*Math.cos(LHA)*Math.sin(lr));
+  return {alt,az:(D(az)+360)%360};
+}
+function baseIntensity(sAz,sunAz,sunAlt){
+  if(sunAlt<=0)return 0;
+  let d=Math.abs(sAz-sunAz);if(d>180)d=360-d;
+  return Math.max(0,Math.cos(R(d)))*Math.pow(Math.sin(R(Math.min(sunAlt,90))),0.4);
+}
+// Overhang shading: lower decks shielded from low-angle sun by upper deck
+function deckIntensity(base,level,sunAlt){
+  if(level>=2||base<0.08)return base;
+  const maxShade=level===0?0.58:0.80;
+  const t=Math.pow(Math.sin(R(Math.min(sunAlt,90))),0.6);
+  return base*(maxShade+(1-maxShade)*t);
+}
+
+// ── COLORS: blue=shade, red=sun ─────────────────────────────
+function iColor(i){
+  if(i<0.11)return{bg:"#023e8a",bdr:"#0077b6",txt:"#90e0ef",s:"Full Shade"};
+  if(i<0.28)return{bg:"#0096c7",bdr:"#00b4d8",txt:"#caf0f8",s:"Great Shade"};
+  if(i<0.46)return{bg:"#90e0ef",bdr:"#48cae4",txt:"#023e8a",s:"Partial Shade"};
+  if(i<0.62)return{bg:"#ffb3b3",bdr:"#ff8080",txt:"#7d0000",s:"Some Sun"};
+  if(i<0.79)return{bg:"#e63946",bdr:"#c1121f",txt:"#fff",s:"Sunny"};
+  return           {bg:"#6d0025",bdr:"#9d0208",txt:"#ffb3b3",s:"Direct Sun"};
+}
+
+// ── STADIUM DATA ────────────────────────────────────────────
+const PARKS=[
+ {id:1, abbr:"BAL",team:"Baltimore Orioles",    name:"Oriole Park at Camden Yards",  city:"Baltimore, MD",     lat:39.284,lon:-76.622, cfAz:40, tz:-4,roof:"open",       cap:45971,yr:1992,div:"AL East",   c1:"#DF4601",c2:"#000",   shape:"camden"},
+ {id:2, abbr:"BOS",team:"Boston Red Sox",       name:"Fenway Park",                  city:"Boston, MA",        lat:42.347,lon:-71.097, cfAz:52, tz:-4,roof:"open",       cap:37755,yr:1912,div:"AL East",   c1:"#BD3039",c2:"#0C2340",shape:"fenway"},
+ {id:3, abbr:"NYY",team:"New York Yankees",     name:"Yankee Stadium",               city:"Bronx, NY",         lat:40.830,lon:-73.926, cfAz:55, tz:-4,roof:"open",       cap:54251,yr:2009,div:"AL East",   c1:"#003087",c2:"#C4CED4",shape:"standard"},
+ {id:4, abbr:"TB", team:"Tampa Bay Rays",       name:"Tropicana Field",              city:"St. Petersburg, FL",lat:27.768,lon:-82.653, cfAz:45, tz:-4,roof:"dome",       cap:25000,yr:1990,div:"AL East",   c1:"#092C5C",c2:"#8FBCE6",shape:"standard"},
+ {id:5, abbr:"TOR",team:"Toronto Blue Jays",    name:"Rogers Centre",                city:"Toronto, ON",       lat:43.641,lon:-79.389, cfAz:65, tz:-4,roof:"retractable",cap:53506,yr:1989,div:"AL East",   c1:"#134A8E",c2:"#E8291C",shape:"standard"},
+ {id:6, abbr:"CWS",team:"Chicago White Sox",    name:"Guaranteed Rate Field",        city:"Chicago, IL",       lat:41.830,lon:-87.634, cfAz:50, tz:-5,roof:"open",       cap:40615,yr:1991,div:"AL Central",c1:"#27251F",c2:"#C4CED4",shape:"standard"},
+ {id:7, abbr:"CLE",team:"Cleveland Guardians",  name:"Progressive Field",            city:"Cleveland, OH",     lat:41.496,lon:-81.685, cfAz:45, tz:-4,roof:"open",       cap:35041,yr:1994,div:"AL Central",c1:"#00385D",c2:"#E31937",shape:"standard"},
+ {id:8, abbr:"DET",team:"Detroit Tigers",       name:"Comerica Park",                city:"Detroit, MI",       lat:42.339,lon:-83.049, cfAz:55, tz:-4,roof:"open",       cap:41083,yr:2000,div:"AL Central",c1:"#0C2340",c2:"#FA4616",shape:"comerica"},
+ {id:9, abbr:"KC", team:"Kansas City Royals",   name:"Kauffman Stadium",             city:"Kansas City, MO",   lat:39.052,lon:-94.480, cfAz:35, tz:-5,roof:"open",       cap:37903,yr:1973,div:"AL Central",c1:"#004687",c2:"#C09A5B",shape:"standard"},
+ {id:10,abbr:"MIN",team:"Minnesota Twins",      name:"Target Field",                 city:"Minneapolis, MN",   lat:44.982,lon:-93.278, cfAz:70, tz:-5,roof:"open",       cap:38544,yr:2010,div:"AL Central",c1:"#002B5C",c2:"#D31145",shape:"standard"},
+ {id:11,abbr:"HOU",team:"Houston Astros",       name:"Minute Maid Park",             city:"Houston, TX",       lat:29.757,lon:-95.356, cfAz:50, tz:-5,roof:"retractable",cap:41168,yr:2000,div:"AL West",   c1:"#002D62",c2:"#EB6E1F",shape:"standard"},
+ {id:12,abbr:"LAA",team:"Los Angeles Angels",   name:"Angel Stadium",                city:"Anaheim, CA",       lat:33.800,lon:-117.883,cfAz:75, tz:-7,roof:"open",       cap:45517,yr:1966,div:"AL West",   c1:"#BA0021",c2:"#003263",shape:"standard"},
+ {id:13,abbr:"OAK",team:"Oakland Athletics",    name:"Sutter Health Park",           city:"Sacramento, CA",    lat:38.580,lon:-121.500,cfAz:50, tz:-7,roof:"open",       cap:14014,yr:1999,div:"AL West",   c1:"#003831",c2:"#EFB21E",shape:"oakland"},
+ {id:14,abbr:"SEA",team:"Seattle Mariners",     name:"T-Mobile Park",                city:"Seattle, WA",       lat:47.591,lon:-122.332,cfAz:60, tz:-7,roof:"retractable",cap:47929,yr:1999,div:"AL West",   c1:"#0C2C56",c2:"#005C5C",shape:"standard"},
+ {id:15,abbr:"TEX",team:"Texas Rangers",        name:"Globe Life Field",             city:"Arlington, TX",     lat:32.751,lon:-97.083, cfAz:45, tz:-5,roof:"retractable",cap:40518,yr:2020,div:"AL West",   c1:"#003278",c2:"#C0111F",shape:"standard"},
+ {id:16,abbr:"ATL",team:"Atlanta Braves",       name:"Truist Park",                  city:"Cumberland, GA",    lat:33.891,lon:-84.468, cfAz:55, tz:-4,roof:"open",       cap:41149,yr:2017,div:"NL East",   c1:"#CE1141",c2:"#13274F",shape:"standard"},
+ {id:17,abbr:"MIA",team:"Miami Marlins",        name:"loanDepot park",               city:"Miami, FL",         lat:25.778,lon:-80.220, cfAz:45, tz:-4,roof:"retractable",cap:36742,yr:2012,div:"NL East",   c1:"#00A3E0",c2:"#EF3340",shape:"standard"},
+ {id:18,abbr:"NYM",team:"New York Mets",        name:"Citi Field",                   city:"Flushing, NY",      lat:40.757,lon:-73.846, cfAz:58, tz:-4,roof:"open",       cap:41922,yr:2009,div:"NL East",   c1:"#002D72",c2:"#FF5910",shape:"standard"},
+ {id:19,abbr:"PHI",team:"Philadelphia Phillies",name:"Citizens Bank Park",           city:"Philadelphia, PA",  lat:39.906,lon:-75.167, cfAz:52, tz:-4,roof:"open",       cap:42792,yr:2004,div:"NL East",   c1:"#E81828",c2:"#002D72",shape:"standard"},
+ {id:20,abbr:"WSH",team:"Washington Nationals", name:"Nationals Park",               city:"Washington, DC",    lat:38.873,lon:-77.007, cfAz:55, tz:-4,roof:"open",       cap:41313,yr:2008,div:"NL East",   c1:"#AB0003",c2:"#14225A",shape:"standard"},
+ {id:21,abbr:"CHC",team:"Chicago Cubs",         name:"Wrigley Field",                city:"Chicago, IL",       lat:41.948,lon:-87.655, cfAz:50, tz:-5,roof:"open",       cap:41649,yr:1914,div:"NL Central",c1:"#0E3386",c2:"#CC3433",shape:"wrigley"},
+ {id:22,abbr:"CIN",team:"Cincinnati Reds",      name:"Great American Ball Park",     city:"Cincinnati, OH",    lat:39.098,lon:-84.508, cfAz:40, tz:-4,roof:"open",       cap:42319,yr:2003,div:"NL Central",c1:"#C6011F",c2:"#000",   shape:"standard"},
+ {id:23,abbr:"MIL",team:"Milwaukee Brewers",    name:"American Family Field",        city:"Milwaukee, WI",     lat:43.028,lon:-87.971, cfAz:45, tz:-5,roof:"retractable",cap:41268,yr:2001,div:"NL Central",c1:"#12284B",c2:"#FFC52F",shape:"standard"},
+ {id:24,abbr:"PIT",team:"Pittsburgh Pirates",   name:"PNC Park",                     city:"Pittsburgh, PA",    lat:40.447,lon:-80.006, cfAz:30, tz:-4,roof:"open",       cap:38362,yr:2001,div:"NL Central",c1:"#27251F",c2:"#FDB827",shape:"pnc"},
+ {id:25,abbr:"STL",team:"St. Louis Cardinals",  name:"Busch Stadium",                city:"St. Louis, MO",     lat:38.623,lon:-90.193, cfAz:65, tz:-5,roof:"open",       cap:44494,yr:2006,div:"NL Central",c1:"#C41E3A",c2:"#0C2340",shape:"standard"},
+ {id:26,abbr:"ARI",team:"Arizona Diamondbacks", name:"Chase Field",                  city:"Phoenix, AZ",       lat:33.446,lon:-112.067,cfAz:50, tz:-7,roof:"retractable",cap:48405,yr:1998,div:"NL West",   c1:"#A71930",c2:"#E3D4AD",shape:"standard"},
+ {id:27,abbr:"COL",team:"Colorado Rockies",     name:"Coors Field",                  city:"Denver, CO",        lat:39.756,lon:-104.994,cfAz:45, tz:-6,roof:"open",       cap:50445,yr:1995,div:"NL West",   c1:"#33006F",c2:"#C4CED4",shape:"standard"},
+ {id:28,abbr:"LAD",team:"Los Angeles Dodgers",  name:"Dodger Stadium",               city:"Los Angeles, CA",   lat:34.074,lon:-118.240,cfAz:60, tz:-7,roof:"open",       cap:56000,yr:1962,div:"NL West",   c1:"#005A9C",c2:"#fff",   shape:"dodger"},
+ {id:29,abbr:"SD", team:"San Diego Padres",     name:"Petco Park",                   city:"San Diego, CA",     lat:32.708,lon:-117.157,cfAz:55, tz:-7,roof:"open",       cap:40209,yr:2004,div:"NL West",   c1:"#2F241D",c2:"#FFC425",shape:"standard"},
+ {id:30,abbr:"SF", team:"San Francisco Giants", name:"Oracle Park",                  city:"San Francisco, CA", lat:37.779,lon:-122.389,cfAz:65, tz:-7,roof:"open",       cap:41915,yr:2000,div:"NL West",   c1:"#FD5A1E",c2:"#27251F",shape:"oracle"},
+];
+
+// ── NAMED ZONES per stadium ──────────────────────────────────
+const ZONES={
+ BAL:{cf:{n:"CF/Eutaw Bleachers (90-98)",a:0},rf:{n:"RF Field Level (1-12)",a:80},fb:{n:"Infield Box 1B (25-42)",a:135},hp:{n:"Field Level HP (44-62)",a:180},tb:{n:"Infield Box 3B (64-79)",a:225},lf:{n:"LF Gallery (276-382)",a:285}},
+ BOS:{cf:{n:"CF Bleachers (42-43)",a:0},rf:{n:"RF Box (Secs 1-3)",a:80},fb:{n:"Grandstand 1B (27-33)",a:135},hp:{n:"Behind HP (13-17)",a:180},tb:{n:"Grandstand 3B (18-26)",a:225},lf:{n:"Green Monster Seats",a:290}},
+ NYY:{cf:{n:"Bleachers/Monument Park (201-238)",a:0},rf:{n:"RF Main Level (103-113)",a:80},fb:{n:"Field Level 1B (108-120)",a:135},hp:{n:"Diamond Field HP (014-020)",a:180},tb:{n:"Main Level 3B (226-229)",a:225},lf:{n:"LF Bleachers (230-238)",a:285}},
+ TB: {cf:{n:"CF Batter's Eye (129-137)",a:0},rf:{n:"RF Foul (51-58)",a:80},fb:{n:"Lower Box 1B (101-115)",a:135},hp:{n:"Press Level HP (205-208)",a:180},tb:{n:"Lower Box 3B (210-220)",a:225},lf:{n:"LF Home Run Porch (341-355)",a:285}},
+ TOR:{cf:{n:"CF WestJet Flight Deck (500 Level)",a:0},rf:{n:"RF 100 Level (126-135)",a:80},fb:{n:"Field Level 1B (112-122)",a:135},hp:{n:"Field Level HP (116-119)",a:180},tb:{n:"Field Level 3B (100-115)",a:225},lf:{n:"LF 500 Level Outfield",a:285}},
+ CWS:{cf:{n:"CF Bleachers (160-163)",a:0},rf:{n:"RF Lower Box (101-108)",a:80},fb:{n:"Lower Box 1B (109-126)",a:135},hp:{n:"Lower Box HP (130-138)",a:180},tb:{n:"Lower Box 3B (139-150)",a:225},lf:{n:"LF Outfield Reserved (153-165)",a:285}},
+ CLE:{cf:{n:"CF Bleachers (180-185)",a:0},rf:{n:"RF Home Run Porch (167-179)",a:80},fb:{n:"Lower Box 1B (110-127)",a:135},hp:{n:"Field Level HP (5-15)",a:180},tb:{n:"Lower Box 3B (128-145)",a:225},lf:{n:"LF District (150-165)",a:285}},
+ DET:{cf:{n:"Chevrolet Pavilion (148-151)",a:0},rf:{n:"RF Lower Box (101-110)",a:80},fb:{n:"Lower Box 1B (114-130)",a:135},hp:{n:"Field Box HP (130-136)",a:180},tb:{n:"Lower Box 3B (137-146)",a:225},lf:{n:"LF Corner/Bullpen (142-149)",a:285}},
+ KC: {cf:{n:"Sonic Slam/Pepsi Porch (101-103)",a:0},rf:{n:"RF Lower (148-152)",a:80},fb:{n:"Lower Box 1B (116-135)",a:135},hp:{n:"Crown Club HP (122-130)",a:180},tb:{n:"Lower Box 3B (138-215)",a:225},lf:{n:"LF Craft & Draft (205-212)",a:285}},
+ MIN:{cf:{n:"Budweiser Roof Deck (329-334)",a:0},rf:{n:"RF Target Plaza (101-105)",a:80},fb:{n:"Lower Box 1B (107-119)",a:135},hp:{n:"Premium HP (1-10)",a:180},tb:{n:"Lower Box 3B (118-126)",a:225},lf:{n:"LF Barrio (126-131)",a:285}},
+ HOU:{cf:{n:"CF Upper (240-244)",a:0},rf:{n:"RF Mezzanine (229-234)",a:80},fb:{n:"Field Box 1B (101-115)",a:135},hp:{n:"Premium HP (1-15)",a:180},tb:{n:"Field Box 3B (106-120)",a:225},lf:{n:"Crawford Boxes (100-108)",a:285}},
+ LAA:{cf:{n:"CF Outfield (235-260)",a:0},rf:{n:"RF Lower (124-135)",a:80},fb:{n:"Field Level 1B (113-123)",a:135},hp:{n:"Diamond Club HP (107-113)",a:180},tb:{n:"Field Level 3B (121-130)",a:225},lf:{n:"LF Outfield (201-210)",a:285}},
+ OAK:{cf:{n:"CF Bleachers",a:0},rf:{n:"RF Sections (201-206)",a:80},fb:{n:"Field Level 1B (101-110)",a:135},hp:{n:"Field Level HP (111-114)",a:180},tb:{n:"Field Level 3B (115-122)",a:225},lf:{n:"LF Corner (122-123)",a:285}},
+ SEA:{cf:{n:"CF Bleachers (133-136)",a:0},rf:{n:"RF Lower Box (102-106)",a:80},fb:{n:"Lower Box 1B (120-130)",a:135},hp:{n:"Lower Box HP (134-141)",a:180},tb:{n:"Lower Box 3B (143-152)",a:225},lf:{n:"LF Bleachers (180-187)",a:285}},
+ TEX:{cf:{n:"CF Upper (135-141)",a:0},rf:{n:"RF Lower (23-26)",a:80},fb:{n:"1B Club (102-112)",a:135},hp:{n:"Home Plate Club (12-17)",a:180},tb:{n:"3B Box (2-11)",a:225},lf:{n:"LF Reserved (141-144)",a:285}},
+ ATL:{cf:{n:"CF Bleachers (154-157)",a:0},rf:{n:"Chop House (108-115)",a:80},fb:{n:"Field Level 1B (116-126)",a:135},hp:{n:"Diamond Club HP (126-132)",a:180},tb:{n:"Field Level 3B (132-140)",a:225},lf:{n:"LF Home Run Porch (147-155)",a:285}},
+ MIA:{cf:{n:"CF Upper Area",a:0},rf:{n:"RF Field Level (17-25)",a:80},fb:{n:"Field Level 1B (25-32)",a:135},hp:{n:"Home Plate Club (1-7)",a:180},tb:{n:"Field Level 3B (2-8)",a:225},lf:{n:"LF Home Run Porch (135-141)",a:285}},
+ NYM:{cf:{n:"CF Bleachers (102-104)",a:0},rf:{n:"RF Mets Landing (131-136)",a:80},fb:{n:"Field Level 1B (110-122)",a:135},hp:{n:"Metropolitan Box HP (101-110)",a:180},tb:{n:"Field Level 3B (123-131)",a:225},lf:{n:"LF Big Apple (137-142)",a:285}},
+ PHI:{cf:{n:"CF Outfield (103-106)",a:0},rf:{n:"RF Porch (107-114)",a:80},fb:{n:"Field Level 1B (115-124)",a:135},hp:{n:"Diamond Club HP (125-131)",a:180},tb:{n:"Field Level 3B (134-142)",a:225},lf:{n:"LF Ashburn Alley (143-150)",a:285}},
+ WSH:{cf:{n:"CF Restaurant Area (139-143)",a:0},rf:{n:"RF Field Level (100-107)",a:80},fb:{n:"Field Level 1B (108-120)",a:135},hp:{n:"Behind HP (120-127)",a:180},tb:{n:"Field Level 3B (128-137)",a:225},lf:{n:"LF District (131-140)",a:285}},
+ CHC:{cf:{n:"CF Bleachers (504-507)",a:0},rf:{n:"RF Bleachers (511-518)",a:80},fb:{n:"Field Box 1B (4-16)",a:135},hp:{n:"Behind HP (1-3/25-27)",a:180},tb:{n:"Terrace Box 3B (114-124)",a:225},lf:{n:"LF Bleachers (523-529)",a:285}},
+ CIN:{cf:{n:"Moon Deck (511-519)",a:0},rf:{n:"RF Sun Deck (505-510)",a:80},fb:{n:"Dugout Box 1B (107-116)",a:135},hp:{n:"Field Box HP (116-120)",a:180},tb:{n:"Dugout Box 3B (120-130)",a:225},lf:{n:"LF View Box (512-519)",a:285}},
+ MIL:{cf:{n:"Harley-Davidson Deck (232-237)",a:0},rf:{n:"RF Field Box (101-115)",a:80},fb:{n:"Field Level 1B (116-130)",a:135},hp:{n:"Diamond Box HP (218-222)",a:180},tb:{n:"Field Level 3B (222-232)",a:225},lf:{n:"LF GEHL Club (233-238)",a:285}},
+ PIT:{cf:{n:"CF Bleachers (166-169)",a:0},rf:{n:"RF General (139-155)",a:80},fb:{n:"Box Level 1B (109-120)",a:135},hp:{n:"Box Level HP (105-108)",a:180},tb:{n:"Box Level 3B (122-132)",a:225},lf:{n:"LF Bleachers (335-339)",a:285}},
+ STL:{cf:{n:"CF Batter's Eye Area",a:0},rf:{n:"RF Bleachers (101-108)",a:80},fb:{n:"Infield Box 1B (129-137)",a:135},hp:{n:"Field Box HP (141-150)",a:180},tb:{n:"Infield Box 3B (152-161)",a:225},lf:{n:"LF Budweiser Porch (162-168)",a:285}},
+ ARI:{cf:{n:"CF Outfield (109-110)",a:0},rf:{n:"RF Field Level (126-135)",a:80},fb:{n:"Field Level 1B (113-120)",a:135},hp:{n:"Diamond HP (114-118)",a:180},tb:{n:"Field Level 3B (120-130)",a:225},lf:{n:"LF Outfield (141-148)",a:285}},
+ COL:{cf:{n:"CF Rockpile (182-195)",a:0},rf:{n:"RF Bleachers (147-155)",a:80},fb:{n:"Lower Box 1B (115-128)",a:135},hp:{n:"Behind HP (105-114)",a:180},tb:{n:"Lower Box 3B (129-142)",a:225},lf:{n:"LF Club (157-167)",a:285}},
+ LAD:{cf:{n:"CF Pavilion (300)",a:0},rf:{n:"RF Pavilion (302-316)",a:75},fb:{n:"Loge 1B (114-130)",a:135},hp:{n:"Field Box HP (25-31)",a:180},tb:{n:"Loge 3B (134-150)",a:225},lf:{n:"LF Pavilion (305-315)",a:285}},
+ SD: {cf:{n:"Park at the Park (CF)",a:0},rf:{n:"RF Western Metal Supply (135-145)",a:80},fb:{n:"Field Level 1B (108-118)",a:135},hp:{n:"Field Level HP (100-108)",a:180},tb:{n:"Field Level 3B (120-134)",a:225},lf:{n:"LF/CF Club Level (148-160)",a:285}},
+ SF: {cf:{n:"CF Bleachers (138-142)",a:0},rf:{n:"RF Arcade (143-147)",a:85},fb:{n:"Lower Box 1B (110-120)",a:135},hp:{n:"Behind HP (105-109)",a:180},tb:{n:"Lower Box 3B (121-130)",a:225},lf:{n:"LF Bleachers (131-137)",a:280}},
+};
+const DEF={cf:{n:"Center Field Bleachers",a:0},rf:{n:"Right Field Sections",a:80},fb:{n:"First Base Side",a:135},hp:{n:"Behind Home Plate",a:180},tb:{n:"Third Base Side",a:225},lf:{n:"Left Field Sections",a:285}};
+const DIVS=["AL East","AL Central","AL West","NL East","NL Central","NL West"];
+
+// ── STADIUM SECTION GEOMETRY ─────────────────────────────────
+function getStadiumSections(shape){
+  const N=36,step=360/N,secs=[];
+  if(shape==="dome"){
+    for(let i=0;i<N;i++)secs.push({a1:i*step,a2:(i+1)*step,lv:2,r1:95,r2:168});
+    return secs;
+  }
+  if(shape==="fenway"){
+    for(let i=0;i<N;i++){
+      const mid=(i+0.5)*step;
+      if(mid>=238&&mid<=328){
+        // LF: Green Monster area — 2 tighter tiers, no upper
+        secs.push({a1:i*step,a2:(i+1)*step,lv:0,r1:88,r2:110});
+        secs.push({a1:i*step,a2:(i+1)*step,lv:1,r1:113,r2:140});
+      } else if(mid>328||mid<55){
+        // CF bleachers: single wide tier
+        secs.push({a1:i*step,a2:(i+1)*step,lv:0,r1:98,r2:152});
+      } else if((mid>=55&&mid<110)||(mid>=208&&mid<238)){
+        // RF foul / 3B line: field + grandstand, no upper
+        secs.push({a1:i*step,a2:(i+1)*step,lv:0,r1:90,r2:122});
+        secs.push({a1:i*step,a2:(i+1)*step,lv:1,r1:125,r2:158});
+      } else {
+        // Infield: field + grandstand + roof seats
+        secs.push({a1:i*step,a2:(i+1)*step,lv:0,r1:88,r2:116});
+        secs.push({a1:i*step,a2:(i+1)*step,lv:1,r1:119,r2:150});
+        secs.push({a1:i*step,a2:(i+1)*step,lv:2,r1:153,r2:180});
+      }
+    }
+    return secs;
+  }
+  if(shape==="oracle"){
+    for(let i=0;i<N;i++){
+      const mid=(i+0.5)*step;
+      if(mid>=52&&mid<=98)continue; // open bay gap in RF
+      if(mid>98&&mid<=138){
+        secs.push({a1:i*step,a2:(i+1)*step,lv:0,r1:93,r2:126});
+        secs.push({a1:i*step,a2:(i+1)*step,lv:1,r1:129,r2:160});
+      } else if((mid>=138&&mid<=220)||(mid>=320||mid<52)){
+        // Infield / HP / 3B
+        secs.push({a1:i*step,a2:(i+1)*step,lv:0,r1:88,r2:116});
+        secs.push({a1:i*step,a2:(i+1)*step,lv:1,r1:119,r2:150});
+        secs.push({a1:i*step,a2:(i+1)*step,lv:2,r1:153,r2:183});
+      } else {
+        secs.push({a1:i*step,a2:(i+1)*step,lv:0,r1:93,r2:126});
+        secs.push({a1:i*step,a2:(i+1)*step,lv:1,r1:129,r2:162});
+        secs.push({a1:i*step,a2:(i+1)*step,lv:2,r1:165,r2:190});
+      }
+    }
+    return secs;
+  }
+  if(shape==="dodger"){
+    // Dodger Stadium: 4-level terraced — Field, Loge, Reserve, Top Deck
+    // Pavilions in RF/LF (no upper deck); tiny CF bleacher
+    for(let i=0;i<N;i++){
+      const mid=(i+0.5)*step;
+      if(mid>=342||mid<=18){
+        // CF pavilion: single bleacher tier, further out
+        secs.push({a1:i*step,a2:(i+1)*step,lv:0,r1:108,r2:150});
+      } else if((mid>18&&mid<=62)||(mid>=298&&mid<342)){
+        // RF/LF pavilion: 2 tiers (Field + Reserve), no top deck
+        secs.push({a1:i*step,a2:(i+1)*step,lv:0,r1:93,r2:120});
+        secs.push({a1:i*step,a2:(i+1)*step,lv:1,r1:123,r2:150});
+      } else if((mid>62&&mid<=98)||(mid>=262&&mid<298)){
+        // RF/LF foul: 3 tiers
+        secs.push({a1:i*step,a2:(i+1)*step,lv:0,r1:88,r2:114});
+        secs.push({a1:i*step,a2:(i+1)*step,lv:1,r1:117,r2:143});
+        secs.push({a1:i*step,a2:(i+1)*step,lv:2,r1:146,r2:171});
+      } else {
+        // Full infield: 4 tiers (Field, Loge, Reserve, Top Deck)
+        secs.push({a1:i*step,a2:(i+1)*step,lv:0,r1:86,r2:108});
+        secs.push({a1:i*step,a2:(i+1)*step,lv:1,r1:111,r2:133});
+        secs.push({a1:i*step,a2:(i+1)*step,lv:2,r1:136,r2:157});
+        secs.push({a1:i*step,a2:(i+1)*step,lv:2,r1:160,r2:182});
+      }
+    }
+    return secs;
+  }
+  if(shape==="wrigley"){
+    for(let i=0;i<N;i++){
+      const mid=(i+0.5)*step;
+      if(mid>=332||mid<=28){
+        secs.push({a1:i*step,a2:(i+1)*step,lv:0,r1:102,r2:158});
+      } else if((mid>28&&mid<=78)||(mid>=282&&mid<332)){
+        secs.push({a1:i*step,a2:(i+1)*step,lv:0,r1:95,r2:128});
+        secs.push({a1:i*step,a2:(i+1)*step,lv:1,r1:131,r2:163});
+      } else if((mid>78&&mid<=108)||(mid>=252&&mid<282)){
+        secs.push({a1:i*step,a2:(i+1)*step,lv:0,r1:90,r2:120});
+        secs.push({a1:i*step,a2:(i+1)*step,lv:1,r1:123,r2:153});
+        secs.push({a1:i*step,a2:(i+1)*step,lv:2,r1:156,r2:183});
+      } else {
+        secs.push({a1:i*step,a2:(i+1)*step,lv:0,r1:88,r2:116});
+        secs.push({a1:i*step,a2:(i+1)*step,lv:1,r1:119,r2:148});
+        secs.push({a1:i*step,a2:(i+1)*step,lv:2,r1:151,r2:180});
+      }
+    }
+    return secs;
+  }
+  if(shape==="pnc"){
+    for(let i=0;i<N;i++){
+      const mid=(i+0.5)*step;
+      if(mid>=38&&mid<=88)continue; // open RF (Allegheny River)
+      if(mid>88&&mid<=128){
+        secs.push({a1:i*step,a2:(i+1)*step,lv:0,r1:92,r2:132});
+      } else if(mid>128&&mid<=212){
+        secs.push({a1:i*step,a2:(i+1)*step,lv:0,r1:88,r2:118});
+        secs.push({a1:i*step,a2:(i+1)*step,lv:2,r1:121,r2:168});
+      } else if(mid>212&&mid<=298){
+        secs.push({a1:i*step,a2:(i+1)*step,lv:0,r1:88,r2:118});
+        secs.push({a1:i*step,a2:(i+1)*step,lv:2,r1:121,r2:165});
+      } else {
+        secs.push({a1:i*step,a2:(i+1)*step,lv:0,r1:96,r2:150});
+      }
+    }
+    return secs;
+  }
+  if(shape==="camden"){
+    // Camden Yards: warehouse in RF, LF gallery separate, no RF upper
+    for(let i=0;i<N;i++){
+      const mid=(i+0.5)*step;
+      if(mid>=318||mid<=52){
+        secs.push({a1:i*step,a2:(i+1)*step,lv:0,r1:96,r2:150});
+      } else if(mid>52&&mid<=105){
+        secs.push({a1:i*step,a2:(i+1)*step,lv:0,r1:90,r2:120});
+        secs.push({a1:i*step,a2:(i+1)*step,lv:1,r1:123,r2:156});
+      } else if(mid>105&&mid<=268){
+        secs.push({a1:i*step,a2:(i+1)*step,lv:0,r1:88,r2:116});
+        secs.push({a1:i*step,a2:(i+1)*step,lv:1,r1:119,r2:148});
+        secs.push({a1:i*step,a2:(i+1)*step,lv:2,r1:151,r2:183});
+      } else {
+        secs.push({a1:i*step,a2:(i+1)*step,lv:0,r1:88,r2:120});
+        secs.push({a1:i*step,a2:(i+1)*step,lv:1,r1:123,r2:162});
+      }
+    }
+    return secs;
+  }
+  if(shape==="comerica"){
+    // Comerica Park: RF party decks instead of full upper; compact LF
+    for(let i=0;i<N;i++){
+      const mid=(i+0.5)*step;
+      if(mid>=335||mid<=25){
+        secs.push({a1:i*step,a2:(i+1)*step,lv:0,r1:102,r2:156});
+      } else if(mid>25&&mid<=90){
+        secs.push({a1:i*step,a2:(i+1)*step,lv:0,r1:90,r2:122});
+        secs.push({a1:i*step,a2:(i+1)*step,lv:1,r1:125,r2:158});
+      } else if(mid>90&&mid<=268){
+        secs.push({a1:i*step,a2:(i+1)*step,lv:0,r1:88,r2:116});
+        secs.push({a1:i*step,a2:(i+1)*step,lv:1,r1:119,r2:148});
+        secs.push({a1:i*step,a2:(i+1)*step,lv:2,r1:151,r2:182});
+      } else {
+        secs.push({a1:i*step,a2:(i+1)*step,lv:0,r1:90,r2:122});
+        secs.push({a1:i*step,a2:(i+1)*step,lv:2,r1:125,r2:165});
+      }
+    }
+    return secs;
+  }
+  if(shape==="oakland"){
+    // Sutter Health Park: small venue, single-level outfield, 2-level infield
+    for(let i=0;i<N;i++){
+      const mid=(i+0.5)*step;
+      if(mid>=340||mid<=20) continue; // CF gap
+      if((mid>20&&mid<=80)||(mid>=280&&mid<340)){
+        secs.push({a1:i*step,a2:(i+1)*step,lv:0,r1:96,r2:148});
+      } else {
+        secs.push({a1:i*step,a2:(i+1)*step,lv:0,r1:90,r2:120});
+        secs.push({a1:i*step,a2:(i+1)*step,lv:1,r1:123,r2:162});
+      }
+    }
+    return secs;
+  }
+  // STANDARD: 3-ring (upper only in infield)
+  for(let i=0;i<N;i++){
+    const mid=(i+0.5)*step;
+    const inf=mid>=78&&mid<=282;
+    const near=mid>=48&&mid<=312;
+    if(inf){
+      secs.push({a1:i*step,a2:(i+1)*step,lv:0,r1:88,r2:116});
+      secs.push({a1:i*step,a2:(i+1)*step,lv:1,r1:119,r2:148});
+      secs.push({a1:i*step,a2:(i+1)*step,lv:2,r1:151,r2:182});
+    } else if(near){
+      secs.push({a1:i*step,a2:(i+1)*step,lv:0,r1:92,r2:128});
+      secs.push({a1:i*step,a2:(i+1)*step,lv:1,r1:131,r2:164});
+    } else {
+      secs.push({a1:i*step,a2:(i+1)*step,lv:0,r1:100,r2:160});
+    }
+  }
+  return secs;
+}
+
+// ── ARC PATH ─────────────────────────────────────────────────
+function arc(cx,cy,r1,r2,a1,a2){
+  const g=0.5,s=R(a1+g),e=R(a2-g);
+  const x1=cx+r1*Math.sin(s),y1=cy-r1*Math.cos(s);
+  const x2=cx+r2*Math.sin(s),y2=cy-r2*Math.cos(s);
+  const x3=cx+r2*Math.sin(e),y3=cy-r2*Math.cos(e);
+  const x4=cx+r1*Math.sin(e),y4=cy-r1*Math.cos(e);
+  const lg=(a2-a1)>180?1:0;
+  return `M${x1} ${y1}L${x2} ${y2}A${r2} ${r2} 0 ${lg} 1 ${x3} ${y3}L${x4} ${y4}A${r1} ${r1} 0 ${lg} 0 ${x1} ${y1}Z`;
+}
+
+// ── DIAGRAM SVG ───────────────────────────────────────────────
+function Diagram({park,sun,size=400}){
+  const cx=size/2,cy=size/2;
+  const isDome=park.roof==="dome";
+  const bR=size*0.126;
+  const secs=useMemo(()=>getStadiumSections(isDome?"dome":park.shape),[park.shape,isDome]);
+  const colored=useMemo(()=>secs.map(sec=>{
+    const mid=(sec.a1+sec.a2)/2;
+    const caz=((park.cfAz+mid)%360+360)%360;
+    const bi=isDome?0:baseIntensity(caz,sun.az,sun.alt);
+    return{...sec,color:iColor(deckIntensity(bi,sec.lv,sun.alt))};
+  }),[secs,park.cfAz,sun,isDome]);
+  const sva=((sun.az-park.cfAz+360)%360);
+  const sunAbove=sun.alt>0;
+  const sr=size*0.504;
+  const sx=cx+sr*Math.sin(R(sva)),sy=cy-sr*Math.cos(R(sva));
+  const lbR=size*0.512;
+  return(
+    <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} style={{display:"block"}}>
+      <defs>
+        <radialGradient id="gf" cx="50%" cy="55%" r="50%"><stop offset="0%" stopColor="#16a34a"/><stop offset="100%" stopColor="#15803d"/></radialGradient>
+        <radialGradient id="gd" cx="50%" cy="60%" r="50%"><stop offset="0%" stopColor="#d97706"/><stop offset="100%" stopColor="#b45309"/></radialGradient>
+        <radialGradient id="bg" cx="50%" cy="50%" r="50%"><stop offset="0%" stopColor="#111827"/><stop offset="100%" stopColor="#0a0f1e"/></radialGradient>
+        <filter id="gl"><feGaussianBlur stdDeviation="2.5" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+      </defs>
+      <circle cx={cx} cy={cy} r={size*0.5} fill="url(#bg)"/>
+      {colored.map((s,i)=><path key={i} d={arc(cx,cy,s.r1,s.r2,s.a1,s.a2)} fill={s.color.bg} opacity={0.94} stroke={s.color.bdr} strokeWidth={0.35}/>)}
+      <circle cx={cx} cy={cy} r={size*0.218} fill="#b45309" opacity={0.45}/>
+      <circle cx={cx} cy={cy} r={size*0.210} fill="url(#gf)"/>
+      <circle cx={cx} cy={cy} r={size*0.150} fill="url(#gd)"/>
+      <polygon points={`${cx},${cy-bR*0.97} ${cx+bR*0.69},${cy} ${cx},${cy+bR*0.67} ${cx-bR*0.69},${cy}`} fill="#16a34a"/>
+      <circle cx={cx} cy={cy} r={bR*0.13} fill="#b45309"/>
+      {[[cx,cy-bR],[cx+bR*0.69,cy],[cx-bR*0.69,cy]].map(([bx,by],bi)=>(
+        <rect key={bi} x={bx-4} y={by-4} width={8} height={8} fill="white" rx={1} transform={`rotate(45,${bx},${by})`}/>
+      ))}
+      <polygon points={`${cx},${cy+bR*1.04} ${cx-6},${cy+bR*0.82} ${cx-6},${cy+bR*0.63} ${cx+6},${cy+bR*0.63} ${cx+6},${cy+bR*0.82}`} fill="white"/>
+      <line x1={cx} y1={cy+bR} x2={cx+size*0.205*0.73} y2={cy-size*0.205*0.68} stroke="white" strokeWidth={1} strokeOpacity={0.28}/>
+      <line x1={cx} y1={cy+bR} x2={cx-size*0.205*0.73} y2={cy-size*0.205*0.68} stroke="white" strokeWidth={1} strokeOpacity={0.28}/>
+      {[{a:0,t:"CF"},{a:90,t:"RF"},{a:180,t:"HP"},{a:270,t:"LF"}].map(({a,t})=>(
+        <text key={t} x={cx+lbR*Math.sin(R(a))} y={cy-lbR*Math.cos(R(a))} textAnchor="middle" dominantBaseline="middle" fill="#64748b" fontSize={size*0.033} fontWeight="bold" fontFamily="system-ui">{t}</text>
+      ))}
+      {sunAbove&&(
+        <g filter="url(#gl)">
+          <circle cx={sx} cy={sy} r={size*0.043} fill="#fbbf24" opacity={0.9}/>
+          <circle cx={sx} cy={sy} r={size*0.025} fill="#fef08a"/>
+          {[0,45,90,135,180,225,270,315].map(ra=>{
+            const a=R(ra),rx1=sx+size*0.056*Math.sin(a),ry1=sy-size*0.056*Math.cos(a);
+            const rx2=sx+size*0.068*Math.sin(a),ry2=sy-size*0.068*Math.cos(a);
+            return<line key={ra} x1={rx1} y1={ry1} x2={rx2} y2={ry2} stroke="#fbbf24" strokeWidth={2.2} strokeLinecap="round"/>;
+          })}
+          <line x1={sx-size*0.05*Math.sin(R(sva))} y1={sy+size*0.05*Math.cos(R(sva))}
+                x2={cx+192*Math.sin(R(sva))*0.96} y2={cy-192*Math.cos(R(sva))*0.96}
+                stroke="#fbbf24" strokeWidth={1.8} strokeOpacity={0.5} strokeDasharray="4 3"/>
+          <text x={sx} y={sy+size*0.082} textAnchor="middle" fill="#fbbf24" fontSize={size*0.026} fontFamily="system-ui">{Math.round(sun.alt)}&#176; alt</text>
+        </g>
+      )}
+      {!sunAbove&&<text x={cx} y={cy+size*0.32} textAnchor="middle" fill="#374151" fontSize={size*0.03} fontFamily="system-ui">Night / Roof Closed</text>}
+      {isDome&&<><circle cx={cx} cy={cy} r={size*0.5} fill="#0f172a" opacity={0.65}/><text x={cx} y={cy-10} textAnchor="middle" fill="#94a3b8" fontSize={size*0.038} fontFamily="system-ui">Dome Stadium</text><text x={cx} y={cy+14} textAnchor="middle" fill="#64748b" fontSize={size*0.028} fontFamily="system-ui">All seats equally cool</text></>}
+    </svg>
+  );
+}
+
+// ── SEAT RECOMMENDATIONS ──────────────────────────────────────
+function Recs({park,sun}){
+  if(park.roof==="dome")return(
+    <div style={{background:"#022c4a",border:"1px solid #0369a1",borderRadius:12,padding:16,marginTop:12}}>
+      <div style={{color:"#38bdf8",fontWeight:600,marginBottom:8}}>Dome / Climate Controlled</div>
+      <div style={{color:"#64748b",fontSize:13}}>No sun concerns! All seats equally comfortable. Best views from lower deck sections behind home plate.</div>
+    </div>
+  );
+  const z=ZONES[park.abbr]||DEF;
+  const entries=Object.values(z).map(({n,a})=>{
+    const caz=((park.cfAz+a)%360+360)%360;
+    const bi=baseIntensity(caz,sun.az,sun.alt);
+    const intensity=deckIntensity(bi,0,sun.alt);
+    return{n,intensity,color:iColor(intensity)};
+  }).sort((a,b)=>a.intensity-b.intensity);
+  const best=entries.slice(0,3),worst=entries.slice(-2);
+  return(
+    <div>
+      <div style={{background:"#022c4a",border:"1px solid #0369a1",borderRadius:12,padding:14,marginBottom:10}}>
+        <div style={{color:"#38bdf8",fontWeight:600,fontSize:14,marginBottom:10}}>Best Seats &#8212; Most Shade</div>
+        {best.map((e,i)=>(
+          <div key={i} style={{display:"flex",alignItems:"center",gap:10,marginBottom:8}}>
+            <div style={{width:14,height:14,borderRadius:4,background:e.color.bg,flexShrink:0,border:`1px solid ${e.color.bdr}`}}/>
+            <div>
+              <div style={{color:"#e2e8f0",fontSize:13,fontWeight:600}}>{e.n}</div>
+              <div style={{color:"#0ea5e9",fontSize:11}}>{e.color.s} &middot; {Math.round(e.intensity*100)}% sun</div>
+            </div>
+          </div>
+        ))}
+      </div>
+      <div style={{background:"#2d0a0a",border:"1px solid #991b1b",borderRadius:12,padding:14}}>
+        <div style={{color:"#f87171",fontWeight:600,fontSize:14,marginBottom:10}}>Avoid &#8212; Direct Sun</div>
+        {worst.map((e,i)=>(
+          <div key={i} style={{display:"flex",alignItems:"center",gap:10,marginBottom:8}}>
+            <div style={{width:14,height:14,borderRadius:4,background:e.color.bg,flexShrink:0,border:`1px solid ${e.color.bdr}`}}/>
+            <div>
+              <div style={{color:"#e2e8f0",fontSize:13,fontWeight:600}}>{e.n}</div>
+              <div style={{color:"#f87171",fontSize:11}}>{e.color.s} &middot; {Math.round(e.intensity*100)}% sun</div>
+            </div>
+          </div>
+        ))}
+      </div>
+      {park.roof==="retractable"&&<div style={{background:"#1e293b",borderRadius:8,padding:10,marginTop:8,border:"1px solid #334155"}}><span style={{color:"#fbbf24",fontSize:12}}>Retractable roof &#8212; check day-of weather for roof status.</span></div>}
+    </div>
+  );
+}
+
+// ── DETAIL VIEW ───────────────────────────────────────────────
+function Detail({park,onBack}){
+  const td=new Date();
+  const [yr,setYr]=useState(td.getFullYear());
+  const [mo,setMo]=useState(td.getMonth()+1);
+  const [dy,setDy]=useState(td.getDate());
+  const [hr,setHr]=useState(19);
+  const [mn,setMn]=useState(5);
+  const sp=sunPos(yr,mo,dy,hr+mn/60,park.tz,park.lat,park.lon);
+  const MN=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+  const fmt=(h,m)=>{const ap=h>=12?"PM":"AM";const h12=h%12||12;return `${h12}:${m.toString().padStart(2,"0")} ${ap}`;};
+  const dim=(y,m)=>new Date(y,m,0).getDate();
+  const dirs=["N","NNE","NE","ENE","E","ESE","SE","SSE","S","SSW","SW","WSW","W","WNW","NW","NNW"];
+  const dStr=az=>dirs[Math.round(az/22.5)%16];
+  const sel={background:"#0a0f1e",color:"white",border:"1px solid #1e2d47",borderRadius:8,padding:"7px 10px",fontSize:13};
+  return(
+    <div style={{background:"#0a0f1e",minHeight:"100%",paddingBottom:40}}>
+      <div style={{background:`linear-gradient(135deg,${park.c1}ee,${park.c1}77)`,padding:"18px 22px 14px",borderBottom:`3px solid ${park.c2}`}}>
+        <button onClick={onBack} style={{background:"rgba(0,0,0,0.4)",border:"none",color:"white",padding:"5px 14px",borderRadius:20,cursor:"pointer",fontSize:12,marginBottom:12}}>&#8592; All Stadiums</button>
+        <div style={{display:"flex",alignItems:"center",gap:14}}>
+          <div style={{width:50,height:50,borderRadius:10,background:"rgba(255,255,255,0.15)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:22,flexShrink:0}}>&#9918;</div>
+          <div>
+            <div style={{color:"rgba(255,255,255,0.55)",fontSize:12}}>{park.div} &middot; {park.city}</div>
+            <div style={{color:"white",fontSize:20,fontWeight:700}}>{park.name}</div>
+            <div style={{color:"rgba(255,255,255,0.45)",fontSize:11,marginTop:2}}>{park.team} &middot; Est. {park.yr} &middot; {park.cap.toLocaleString()} seats &middot; {park.roof==="dome"?"Dome":park.roof==="retractable"?"Retractable Roof":"Open Air"}</div>
+          </div>
+        </div>
+      </div>
+      <div style={{padding:"18px 22px",maxWidth:980,margin:"0 auto"}}>
+        <div style={{background:"#111827",borderRadius:12,padding:16,marginBottom:18,border:"1px solid #1e2d47"}}>
+          <div style={{color:"#374151",fontSize:11,fontWeight:700,marginBottom:12,letterSpacing:1}}>SET GAME DATE &amp; TIME (Local Stadium Time)</div>
+          <div style={{display:"flex",gap:10,flexWrap:"wrap",alignItems:"flex-end"}}>
+            <div><div style={{color:"#374151",fontSize:10,marginBottom:4}}>MONTH</div><select value={mo} onChange={e=>{const nm=+e.target.value;setMo(nm);setDy(Math.min(dy,dim(yr,nm)));}} style={sel}>{MN.map((n,i)=><option key={i+1} value={i+1}>{n}</option>)}</select></div>
+            <div><div style={{color:"#374151",fontSize:10,marginBottom:4}}>DAY</div><select value={dy} onChange={e=>setDy(+e.target.value)} style={sel}>{Array.from({length:dim(yr,mo)},(_,i)=><option key={i+1} value={i+1}>{i+1}</option>)}</select></div>
+            <div><div style={{color:"#374151",fontSize:10,marginBottom:4}}>YEAR</div><select value={yr} onChange={e=>setYr(+e.target.value)} style={sel}>{[2025,2026,2027,2028].map(y=><option key={y} value={y}>{y}</option>)}</select></div>
+            <div><div style={{color:"#374151",fontSize:10,marginBottom:4}}>HOUR</div><select value={hr} onChange={e=>setHr(+e.target.value)} style={sel}>{Array.from({length:24},(_,i)=><option key={i} value={i}>{i===0?"12 AM":i<12?`${i} AM`:i===12?"12 PM":`${i-12} PM`}</option>)}</select></div>
+            <div><div style={{color:"#374151",fontSize:10,marginBottom:4}}>MIN</div><select value={mn} onChange={e=>setMn(+e.target.value)} style={sel}>{[0,5,10,15,20,25,30,35,40,45,50,55].map(m=><option key={m} value={m}>{m.toString().padStart(2,"0")}</option>)}</select></div>
+            <div style={{marginLeft:"auto",background:sp.alt>0?"#431407":"#111827",borderRadius:10,padding:"10px 14px",textAlign:"center",border:`1px solid ${sp.alt>0?"#9a3412":"#1e2d47"}`,minWidth:105}}>
+              <div style={{fontSize:22}}>{sp.alt>0?"&#9728;":"&#127769;"}</div>
+              <div style={{color:"#e2e8f0",fontSize:13,fontWeight:700}}>{fmt(hr,mn)}</div>
+              {sp.alt>0?<><div style={{color:"#fb923c",fontSize:11}}>Alt: {Math.round(sp.alt)}&#176;</div><div style={{color:"#fb923c",fontSize:11}}>Az: {Math.round(sp.az)}&#176; {dStr(sp.az)}</div></>:<div style={{color:"#374151",fontSize:11}}>Sun below horizon</div>}
+            </div>
+          </div>
+        </div>
+        <div style={{display:"flex",gap:20,flexWrap:"wrap"}}>
+          <div style={{flex:"1 1 410px"}}>
+            <div style={{background:"#111827",borderRadius:12,padding:16,border:"1px solid #1e2d47"}}>
+              <div style={{color:"#374151",fontSize:11,fontWeight:700,letterSpacing:1,marginBottom:12}}>SUN EXPOSURE MAP &#8212; {MN[mo-1]} {dy}, {yr} at {fmt(hr,mn)}</div>
+              <div style={{display:"flex",justifyContent:"center"}}><Diagram park={park} sun={sp} size={385}/></div>
+              <div style={{display:"flex",gap:8,flexWrap:"wrap",marginTop:12}}>
+                {[0.05,0.20,0.38,0.54,0.70,0.88].map((v,i)=>{const c=iColor(v);return<div key={i} style={{display:"flex",alignItems:"center",gap:5}}><div style={{width:14,height:14,borderRadius:4,background:c.bg,border:`1px solid ${c.bdr}`}}/><span style={{fontSize:10,color:"#4b5563"}}>{c.s}</span></div>;})}
+              </div>
+              <div style={{color:"#1f2937",fontSize:10,marginTop:8}}>CF at top &middot; Rings = Field / Club / Upper deck &middot; Sun shown outside ring</div>
+            </div>
+          </div>
+          <div style={{flex:"1 1 270px"}}>
+            <div style={{color:"#374151",fontSize:11,fontWeight:700,letterSpacing:1,marginBottom:8}}>SEAT RECOMMENDATIONS</div>
+            <Recs park={park} sun={sp}/>
+            <div style={{background:"#111827",borderRadius:12,padding:14,marginTop:14,border:"1px solid #1e2d47"}}>
+              <div style={{color:"#38bdf8",fontSize:13,fontWeight:600,marginBottom:10}}>Quick Tips</div>
+              {[["Evening games (7pm+) = natural shade on one full side as sun moves west."],["April &amp; Sept: lower sun arc means more sections naturally shaded."],["Upper deck overhangs shield Field &amp; Club levels below on sun-facing sides."],["CF faces "+park.cfAz+"&#176; ("+dStr(park.cfAz)+") &#8212; anchor of all shade patterns."]].map((t,i)=>(
+                <div key={i} style={{display:"flex",gap:8,marginBottom:8}}>
+                  <span style={{color:"#1d4ed8",flexShrink:0}}>{["&#127749;","&#128197;","&#127913;","&#129517;"][i]}</span>
+                  <span style={{color:"#4b5563",fontSize:12,lineHeight:1.5}} dangerouslySetInnerHTML={{__html:t[0]}}/>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── STADIUM CARD ──────────────────────────────────────────────
+function SCard({park,visited,onToggle,onSel}){
+  return(
+    <div className="scard" onClick={()=>onSel(park)}
+      style={{background:visited?"#0b1f3a":"#0f1929",border:`1px solid ${visited?"#1d4ed8":"#1a2540"}`,borderRadius:9,padding:"10px 12px",cursor:"pointer"}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+        <div style={{flex:1,minWidth:0}}>
+          <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:3}}>
+            <div style={{width:9,height:9,borderRadius:"50%",background:park.c1,flexShrink:0,border:`2px solid ${park.c2}`}}/>
+            <span style={{color:"#e2e8f0",fontSize:13,fontWeight:600}}>{park.abbr}</span>
+          </div>
+          <div style={{color:"#4b5563",fontSize:11,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{park.name}</div>
+          <div style={{color:"#1f2937",fontSize:10,marginTop:1}}>{park.city}</div>
+          <span style={{fontSize:9,background:"#070d18",color:"#374151",padding:"2px 5px",borderRadius:4,display:"inline-block",marginTop:4}}>{park.roof==="dome"?"Dome":park.roof==="retractable"?"Retract.":"Open"}</span>
+        </div>
+        <button onClick={e=>{e.stopPropagation();onToggle(park.id);}}
+          style={{width:24,height:24,borderRadius:6,border:`2px solid ${visited?"#2563eb":"#1a2540"}`,background:visited?"#2563eb":"transparent",color:"white",cursor:"pointer",fontSize:12,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,marginLeft:8}}>
+          {visited?"&#10003;":""}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ── MAIN APP ──────────────────────────────────────────────────
+function App(){
+  const [visited,setVisited]=useState(new Set());
+  const [selected,setSelected]=useState(PARKS.find(p=>p.abbr==="LAD"));
+  const [showDet,setShowDet]=useState(true);
+  const [search,setSearch]=useState("");
+  const [fDiv,setFDiv]=useState("All");
+  const toggle=useCallback(id=>setVisited(p=>{const n=new Set(p);n.has(id)?n.delete(id):n.add(id);return n;}),[]);
+  const sel=useCallback(p=>{setSelected(p);setShowDet(true);},[]);
+  const filtered=PARKS.filter(p=>{const q=search.toLowerCase();return(p.team.toLowerCase().includes(q)||p.name.toLowerCase().includes(q)||p.city.toLowerCase().includes(q)||p.abbr.toLowerCase().includes(q))&&(fDiv==="All"||p.div===fDiv);});
+  const pct=Math.round((visited.size/30)*100);
+  const ss={background:"#070d18",color:"white",border:"1px solid #1a2540",borderRadius:8,padding:"6px 8px",fontSize:11,width:"100%",marginTop:6};
+  return(
+    <div style={{fontFamily:"system-ui,-apple-system,sans-serif",background:"#0a0f1e",height:"100vh",display:"flex",flexDirection:"column",overflow:"hidden"}}>
+      <div style={{background:"#050a14",borderBottom:"1px solid #0f1929",padding:"10px 18px",display:"flex",alignItems:"center",gap:14,flexShrink:0}}>
+        <span style={{fontSize:20}}>&#9918;</span>
+        <div>
+          <div style={{fontWeight:700,fontSize:16,color:"#f1f5f9"}}>MLB Stadium Sun Tracker</div>
+          <div style={{fontSize:10,color:"#1f2937"}}>Find the perfect shaded seat at all 30 ballparks</div>
+        </div>
+        <div style={{marginLeft:"auto",textAlign:"right"}}>
+          <div style={{color:"#6b7280",fontSize:12,fontWeight:600}}>{visited.size} / 30 Visited</div>
+          <div style={{width:110,height:4,background:"#111827",borderRadius:2,marginTop:5,overflow:"hidden"}}>
+            <div style={{height:"100%",width:`${pct}%`,background:"linear-gradient(90deg,#0096c7,#38bdf8)",borderRadius:2,transition:"width 0.3s"}}/>
+          </div>
+        </div>
+      </div>
+      <div style={{display:"flex",flex:1,overflow:"hidden"}}>
+        <div style={{width:228,background:"#07101f",borderRight:"1px solid #0f1929",display:"flex",flexDirection:"column",flexShrink:0,overflow:"hidden"}}>
+          <div style={{padding:"12px 10px",borderBottom:"1px solid #0f1929",flexShrink:0}}>
+            <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search teams or cities..."
+              style={{width:"100%",background:"#0f1929",border:"1px solid #1a2540",borderRadius:8,padding:"7px 10px",color:"white",fontSize:12,boxSizing:"border-box"}}/>
+            <select value={fDiv} onChange={e=>setFDiv(e.target.value)} style={ss}>
+              <option value="All">All Divisions</option>
+              {DIVS.map(d=><option key={d} value={d}>{d}</option>)}
+            </select>
+            <div style={{color:"#1a2540",fontSize:9,marginTop:7,lineHeight:1.5}}>Click checkmark to mark visited &middot; click card to open sun map</div>
+          </div>
+          <div style={{overflowY:"auto",flex:1,padding:"8px 8px"}}>
+            {DIVS.filter(d=>fDiv==="All"||fDiv===d).map(div=>{
+              const ds=filtered.filter(p=>p.div===div);
+              if(!ds.length)return null;
+              return<div key={div} style={{marginBottom:14}}>
+                <div style={{color:"#1a2540",fontSize:9,fontWeight:700,letterSpacing:1,marginBottom:5,paddingLeft:3}}>{div}</div>
+                <div style={{display:"flex",flexDirection:"column",gap:5}}>
+                  {ds.map(p=><SCard key={p.id} park={p} visited={visited.has(p.id)} onToggle={toggle} onSel={sel}/>)}
+                </div>
+              </div>;
+            })}
+          </div>
+        </div>
+        <div style={{flex:1,overflowY:"auto"}}>
+          {showDet&&selected?<Detail park={selected} onBack={()=>setShowDet(false)}/>
+            :<div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",height:"100%"}}>
+               <div style={{fontSize:54,marginBottom:14}}>&#9918;</div>
+               <div style={{fontSize:17,fontWeight:600,color:"#1f2937"}}>Select a Stadium</div>
+             </div>}
+        </div>
+      </div>
+    </div>
+  );
+}
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
